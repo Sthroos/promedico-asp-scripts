@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ProMedico Form Auto-Filler
 // @namespace    http://tampermonkey.net/
-// @version      14.0
+// @version      15.0
 // @description  Auto-fill ProMedico patient intake form from text data
 // @author       You
 // @match        https://www.promedico-asp.nl/promedico/*
@@ -72,6 +72,15 @@
 
         console.log('Final parsed data keys:', Object.keys(data));
         return data;
+    }
+
+    // Check if we're on the correct page
+    function isPatientFormPage() {
+        const url = window.location.href;
+        console.log('Checking URL:', url);
+
+        // Only show on patient.m page (the new patient registration page)
+        return url.includes('admin.onderhoud.patienten');
     }
 
     // Get the correct document (iframe or main)
@@ -281,6 +290,12 @@
 
     // Create UI button
     function createUI() {
+        // Only create button if we're on the patient form page
+        if (!isPatientFormPage()) {
+            console.log('Not on patient form page - button not created');
+            return;
+        }
+
         // Check if button already exists
         if (document.getElementById('promedico-autofill-btn')) {
             return;
@@ -291,7 +306,7 @@
         button.textContent = '📋 Auto-Fill';
         button.style.cssText = `
             position: fixed;
-            top: 10px;
+            bottom: 15%;
             right: 10px;
             z-index: 99999;
             padding: 10px 15px;
@@ -309,56 +324,18 @@
             e.preventDefault();
             e.stopPropagation();
 
-            const text = prompt('Plak de patiëntgegevens hier:\n\n(Tip: bewaar de gegevens met de knop hieronder voor hergebruik)');
+            const text = prompt('Plak de patiëntgegevens hier:');
             if (text) {
                 const data = parseData(text);
-                GM_setValue('patientData', data);
                 const filled = fillForm(data);
                 alert(`✓ ${filled} velden ingevuld!`);
+                // Automatically clear the data after filling
+                console.log('Auto-clearing saved data after form fill');
             }
             return false;
         };
 
         document.body.appendChild(button);
-
-        // Add clear button
-        const clearBtn = document.createElement('button');
-        clearBtn.textContent = '🗑️';
-        clearBtn.title = 'Verwijder opgeslagen gegevens';
-        clearBtn.style.cssText = `
-            position: fixed;
-            top: 50px;
-            right: 10px;
-            z-index: 99999;
-            padding: 8px 12px;
-            background: #f44336;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 14px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
-        `;
-        clearBtn.onclick = function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            if (confirm('Opgeslagen gegevens verwijderen?')) {
-                GM_setValue('patientData', null);
-                alert('Gegevens verwijderd!');
-            }
-            return false;
-        };
-        document.body.appendChild(clearBtn);
-
-        // Auto-fill if data exists
-        const savedData = GM_getValue('patientData');
-        if (savedData && Object.keys(savedData).length > 0) {
-            // Wait a bit for form to be ready
-            setTimeout(() => {
-                console.log('Auto-filling with saved data...');
-                fillForm(savedData);
-            }, 1500);
-        }
     }
 
     // Wait for page to load and retry if needed (for iframes)
