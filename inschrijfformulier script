@@ -1,0 +1,378 @@
+// ==UserScript==
+// @name         ProMedico Form Auto-Filler
+// @namespace    http://tampermonkey.net/
+// @version      14.0
+// @description  Auto-fill ProMedico patient intake form from text data
+// @author       You
+// @match        https://www.promedico-asp.nl/promedico/*
+// @run-at       document-idle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Parse the text data into a structured object
+    function parseData(text) {
+        const data = {};
+
+        console.log('=== Parsing data ===');
+        console.log('Raw text length:', text.length);
+        console.log('First 200 chars:', text.substring(0, 200));
+
+        // Split by newlines - handle both \n and \r\n
+        let lines = text.split(/\r?\n/);
+
+        // If we only got 1 line but the text is long, it might have been pasted without proper newlines
+        // Try to split on field names we know exist
+        if (lines.length === 1 && text.length > 100) {
+            console.log('Text appears to be on one line - attempting smart split...');
+            // Look for patterns like "Fieldname:" followed by value and next "Fieldname:"
+            const fieldPattern = /(Van|Berichtinhoud|Voorletters|Voornamen|Achternaam|Naam volgorde|BSN|Type ID bewijs|ID bewijs nummer|Geboorteplaats|Geboortedatum|Geslacht|Gender|Beroep|Adresgegevens|Telefoonnummer|Zorgverzekeraar|Polisnummer|Polisdatum|Apotheek|LSP toestemming|Vorige huisarts|Adres huisarts|Telefoonnummer huisarts|Toestemming opvragen dossier|Opmerkingen patient):/g;
+
+            let matches = [];
+            let match;
+            while ((match = fieldPattern.exec(text)) !== null) {
+                matches.push({ name: match[1], index: match.index });
+            }
+
+            lines = [];
+            for (let i = 0; i < matches.length; i++) {
+                const start = matches[i].index;
+                const end = i < matches.length - 1 ? matches[i + 1].index : text.length;
+                const line = text.substring(start, end).trim();
+                lines.push(line);
+            }
+            console.log('Smart split resulted in', lines.length, 'lines');
+        }
+
+        console.log('Total lines:', lines.length);
+
+        for (let line of lines) {
+            if (line.includes(':')) {
+                const colonIndex = line.indexOf(':');
+                const key = line.substring(0, colonIndex).trim();
+                const value = line.substring(colonIndex + 1).trim();
+                if (key && value) {
+                    data[key] = value;
+                    console.log(`Parsed: "${key}" = "${value}"`);
+                }
+            }
+        }
+
+        // Extract email from the "Van" field if not separately provided
+        if (data['Van'] && !data['E-mail']) {
+            const emailMatch = data['Van'].match(/[\w.-]+@[\w.-]+\.\w+/);
+            if (emailMatch) {
+                data['E-mail'] = emailMatch[0];
+                console.log('Extracted email:', data['E-mail']);
+            }
+        }
+
+        console.log('Final parsed data keys:', Object.keys(data));
+        return data;
+    }
+
+    // Get the correct document (iframe or main)
+    function getTargetDocument() {
+        console.log('Current URL:', window.location.href);
+
+        // Check if we're in any admin.onderhoud.patienten page (inside iframe)
+        if (window.location.href.includes('admin.onderhoud.patienten')) {
+            console.log('✓ We are inside a patient form page - using current document');
+            return document;
+        }
+
+        console.log('We are on main page - looking for iframe...');
+        const iframe = document.getElementById('panelBackCompatibility-frame');
+        if (iframe) {
+            console.log('✓ Found iframe');
+            try {
+                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                console.log('✓ Got iframe document');
+                return iframeDoc;
+            } catch (e) {
+                console.error('❌ Cannot access iframe:', e);
+            }
+        } else {
+            console.log('❌ Iframe not found - using current document');
+        }
+
+        return document;
+    }
+
+    // Fill a field with proper event triggering
+    function fillField(fieldId, value) {
+        const targetDoc = getTargetDocument();
+        const field = targetDoc.getElementById(fieldId);
+
+        if (!field) {
+            console.warn(`❌ Field not found: ${fieldId}`);
+            return false;
+        }
+
+        console.log(`Found field ${fieldId}, type: ${field.tagName}, current value: "${field.value}"`);
+
+        if (field.tagName === 'SELECT') {
+            // For dropdowns, find matching option
+            let found = false;
+            for (let option of field.options) {
+                if (option.text.toLowerCase().includes(value.toLowerCase()) ||
+                    option.value.toLowerCase() === value.toLowerCase()) {
+                    field.value = option.value;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                console.warn(`No matching option found for ${fieldId}: ${value}`);
+                return false;
+            }
+        } else if (field.type === 'radio') {
+            field.checked = true;
+        } else {
+            field.value = value;
+        }
+
+        // Trigger events
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        field.dispatchEvent(new Event('blur', { bubbles: true }));
+
+        // Trigger onchange if defined
+        if (field.onchange) {
+            try {
+                field.onchange();
+            } catch(e) {
+                console.warn(`Error triggering onchange for ${fieldId}:`, e);
+            }
+        }
+
+        console.log(`✓ Filled ${fieldId} with: ${value}`);
+        return true;
+    }
+
+    // Fill the form with data
+    function fillForm(data) {
+        let filled = 0;
+
+        console.log('=== Starting fillForm ===');
+        console.log('Data received:', data);
+
+        // Achternaam
+        if (data['Achternaam']) {
+            console.log('Trying Achternaam:', data['Achternaam']);
+            if (fillField('patientPersoonWrapper.persoon.achternaam', data['Achternaam'])) filled++;
+        }
+
+        // Naamgebruik - capitalize first letter and map to lowercase value
+        if (data['Naam volgorde']) {
+            const naamgebruik = data['Naam volgorde'].toLowerCase().replace(' ', '_');
+            if (fillField('patientPersoonWrapper.persoon.naamgebruik', naamgebruik)) filled++;
+        }
+
+        // Voorletters - remove dots
+        if (data['Voorletters']) {
+            const voorletters = data['Voorletters'].replace(/\./g, '');
+            if (fillField('patientPersoonWrapper.persoon.voorletters', voorletters)) filled++;
+        }
+
+        // Roepnaam (Voornamen)
+        if (data['Voornamen']) {
+            if (fillField('patientPersoonWrapper.persoon.roepnaam', data['Voornamen'])) filled++;
+        }
+
+        // Geboortedatum - convert format if needed (26 apr 1906 -> 26-04-1906)
+        if (data['Geboortedatum']) {
+            let geboortedatum = data['Geboortedatum'];
+            // Try to convert "26 apr 1906" format to "26-04-1906"
+            const monthMap = {
+                'jan': '01', 'feb': '02', 'mrt': '03', 'apr': '04',
+                'mei': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+                'sep': '09', 'okt': '10', 'nov': '11', 'dec': '12'
+            };
+            const match = geboortedatum.match(/(\d+)\s+(\w+)\s+(\d{4})/);
+            if (match) {
+                const day = match[1].padStart(2, '0');
+                const month = monthMap[match[2].toLowerCase()] || match[2];
+                const year = match[3];
+                geboortedatum = `${day}-${month}-${year}`;
+            }
+            if (fillField('patientPersoonWrapper.persoon.geboortedatum', geboortedatum)) filled++;
+        }
+
+        // Geboorteplaats
+        if (data['Geboorteplaats']) {
+            if (fillField('patientPersoonWrapper.persoon.geboorteplaats', data['Geboorteplaats'])) filled++;
+        }
+
+        // Geslacht - map to M/V
+        if (data['Geslacht']) {
+            const geslacht = data['Geslacht'].toLowerCase().includes('man') ? 'M' : 'V';
+            if (fillField('patientPersoonWrapper.persoon.geslachtString', geslacht)) filled++;
+        }
+
+        // Beroep
+        if (data['Beroep']) {
+            if (fillField('patientPersoonWrapper.persoon.beroep', data['Beroep'])) filled++;
+        }
+
+        // Thuisnummer
+        if (data['Telefoonnummer']) {
+            if (fillField('patientPersoonWrapper.persoon.telefoonnummer1', data['Telefoonnummer'])) filled++;
+        }
+
+        // E-mail
+        if (data['E-mail']) {
+            if (fillField('patientPersoonWrapper.persoon.email', data['E-mail'])) filled++;
+        }
+
+        // Set Huisarts to "X.X. xxxx"
+        const targetDoc = getTargetDocument();
+        const huisartsField = targetDoc.getElementById('praktijkMedewerker');
+        if (huisartsField) {
+            for (let option of huisartsField.options) {
+                if (option.text.includes('X.X.') && option.text.includes('xxxx')) {
+                    huisartsField.value = option.value;
+                    huisartsField.dispatchEvent(new Event('change', { bubbles: true }));
+                    if (huisartsField.onchange) huisartsField.onchange();
+                    filled++;
+                    console.log('Set Huisarts to X.X. xxxx');
+                    break;
+                }
+            }
+        }
+
+        // BSN
+        if (data['BSN']) {
+            if (fillField('bsn', data['BSN'])) filled++;
+        }
+
+        // Nr. wettelijk ident.
+        if (data['ID bewijs nummer']) {
+            if (fillField('patientPersoonWrapper.persoon.identificatieDocNumber', data['ID bewijs nummer'])) filled++;
+        }
+
+        // Soort wettelijk ident. doc. - map types
+        if (data['Type ID bewijs']) {
+            const typeMap = {
+                'Paspoort': 'P',
+                'Rijbewijs': 'R',
+                'Identiteitskaart': 'I'
+            };
+            const typeValue = typeMap[data['Type ID bewijs']] || data['Type ID bewijs'];
+            if (fillField('patientPersoonWrapper.persoon.widDocSoort', typeValue)) filled++;
+        }
+
+        // Identiteit vergewist - set to "Ja"
+        const identiteitJa = targetDoc.getElementById('identiteitVergewistJa');
+        if (identiteitJa) {
+            identiteitJa.checked = true;
+            identiteitJa.dispatchEvent(new Event('change', { bubbles: true }));
+            // Don't trigger the onclick as it submits the form
+            filled++;
+            console.log('Set Identiteit vergewist to Ja');
+        }
+
+        console.log(`Auto-filled ${filled} fields`);
+        return filled;
+    }
+
+    // Create UI button
+    function createUI() {
+        // Check if button already exists
+        if (document.getElementById('promedico-autofill-btn')) {
+            return;
+        }
+
+        const button = document.createElement('button');
+        button.id = 'promedico-autofill-btn';
+        button.textContent = '📋 Auto-Fill';
+        button.style.cssText = `
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 99999;
+            padding: 10px 15px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        `;
+
+        button.onclick = function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const text = prompt('Plak de patiëntgegevens hier:\n\n(Tip: bewaar de gegevens met de knop hieronder voor hergebruik)');
+            if (text) {
+                const data = parseData(text);
+                GM_setValue('patientData', data);
+                const filled = fillForm(data);
+                alert(`✓ ${filled} velden ingevuld!`);
+            }
+            return false;
+        };
+
+        document.body.appendChild(button);
+
+        // Add clear button
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = '🗑️';
+        clearBtn.title = 'Verwijder opgeslagen gegevens';
+        clearBtn.style.cssText = `
+            position: fixed;
+            top: 50px;
+            right: 10px;
+            z-index: 99999;
+            padding: 8px 12px;
+            background: #f44336;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        `;
+        clearBtn.onclick = function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (confirm('Opgeslagen gegevens verwijderen?')) {
+                GM_setValue('patientData', null);
+                alert('Gegevens verwijderd!');
+            }
+            return false;
+        };
+        document.body.appendChild(clearBtn);
+
+        // Auto-fill if data exists
+        const savedData = GM_getValue('patientData');
+        if (savedData && Object.keys(savedData).length > 0) {
+            // Wait a bit for form to be ready
+            setTimeout(() => {
+                console.log('Auto-filling with saved data...');
+                fillForm(savedData);
+            }, 1500);
+        }
+    }
+
+    // Wait for page to load and retry if needed (for iframes)
+    function init() {
+        if (document.body) {
+            createUI();
+        } else {
+            setTimeout(init, 500);
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
